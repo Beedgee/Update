@@ -60,15 +60,12 @@ class Cortex(object):
         self.funpay_connection_ok = False
         self.is_in_degraded_mode = False
         self.degraded_mode_start_time: float | None = None
-        self.IS_HOSTING_ENV = is_hosting_env
         
-        self.HOSTING_USER_ID = os.getenv("FPCORTEX_USER_ID")
-        if self.HOSTING_USER_ID:
-            try:
-                self.HOSTING_USER_ID = int(self.HOSTING_USER_ID)
-            except ValueError:
-                logger.error("FPCORTEX_USER_ID is not an integer.")
-                self.HOSTING_USER_ID = None
+        # [MODIFIED] Принудительно отключаем режим хостинга
+        self.IS_HOSTING_ENV = False
+        
+        # [MODIFIED] Убираем ID пользователя хостинга
+        self.HOSTING_USER_ID = None
         
         self.next_retry_timestamp = 0
         self.AR_CFG_LOAD_ERROR = False
@@ -86,15 +83,13 @@ class Cortex(object):
         
         self.executor = ThreadPoolExecutor(max_workers=20, thread_name_prefix='CortexWorker')
 
-        if self.IS_HOSTING_ENV:
-            self.hosting_url = os.getenv("FPCORTEX_INTERNAL_BACKEND_URL", "http://backend:8000")
-            self.hosting_token = os.getenv("FPCORTEX_BOT_TOKEN")
-        else:
-            self.hosting_url = self.MAIN_CFG["CortexHosting"].get("url")
-            self.hosting_token = self.MAIN_CFG["CortexHosting"].get("token")
+        # [MODIFIED] Отключаем URL и токен хостинга
+        self.hosting_url = None
+        self.hosting_token = None
 
-        self.is_subscription_active = False
-        self.access_level = 0
+        # [MODIFIED] Выдаем максимальные права по умолчанию
+        self.is_subscription_active = True
+        self.access_level = 99
         self.purchased_features: list[str] = []
 
         self.last_successful_check = 0
@@ -222,173 +217,45 @@ class Cortex(object):
         self.watchdog_enabled = True
 
     def _sync_settings_from_backend(self):
-        if not self.hosting_url or not self.hosting_token:
-            logger.info("Hosting not configured. Working locally.")
-            return
-
-        if not self.HOSTING_USER_ID:
-            logger.warning("Hosting mode active but FPCORTEX_USER_ID not found.")
-            return
-
-        logger.info(f"Syncing settings with server (User ID: {self.HOSTING_USER_ID})...")
-        
-        headers = {"X-Bot-Token": self.hosting_token}
-        params = {"user_id": self.HOSTING_USER_ID}
-
-        config_files = ["_main.cfg", "auto_response.cfg", "auto_delivery.cfg"]
-        for filename in config_files:
-            try:
-                url = f"{self.hosting_url}/api/bot/settings/config/{filename}"
-                response = requests.get(url, headers=headers, params=params, timeout=15)
-                
-                if response.status_code == 200:
-                    file_path = os.path.join(self.base_path, "configs", filename)
-                    with open(file_path, "w", encoding="utf-8") as f:
-                        f.write(response.text)
-                    logger.info(f"Config '{filename}' synced.")
-                else:
-                    logger.warning(f"Backend returned {response.status_code} for '{filename}': {response.text}")
-
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Failed to sync '{filename}': {e}. Using local version.")
-            except Exception as e:
-                logger.error(f"Unexpected error syncing '{filename}': {e}")
-
-        json_settings = ["blacklist", "templates", "notifications"]
-        for setting_name in json_settings:
-            try:
-                url = f"{self.hosting_url}/api/bot/settings/json/{setting_name}"
-                response = requests.get(url, headers=headers, params=params, timeout=15)
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    
-                    if setting_name == "blacklist":
-                        cortex_tools.cache_blacklist(data, self.base_path)
-                    elif setting_name == "templates":
-                        templates_path = os.path.join(self.base_path, "storage/cache/answer_templates.json")
-                        with open(templates_path, "w", encoding="utf-8") as f:
-                            json.dump(data, f, ensure_ascii=False, indent=4)
-                    elif setting_name == "notifications":
-                        notif_path = os.path.join(self.base_path, "storage/cache/notifications.json")
-                        with open(notif_path, "w", encoding="utf-8") as f:
-                            json.dump(data, f, ensure_ascii=False, indent=4)
-                            
-                    logger.info(f"Setting '{setting_name}' synced.")
-                else:
-                    logger.warning(f"Backend returned {response.status_code} for '{setting_name}'")
-
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Failed to sync '{setting_name}': {e}. Using local version.")
-            except (json.JSONDecodeError, Exception) as e:
-                logger.error(f"Unexpected error syncing '{setting_name}': {e}")
+        # [MODIFIED] Отключена синхронизация с бэкендом
+        return
 
     def _default_save_json_setting(self, setting_name: str, data: dict | list):
         pass
 
     def load_subscription_cache(self):
+        # [MODIFIED] Кэш подписки больше не нужен, но метод оставлен пустым или с базовой логикой
         if not os.path.exists(self.subscription_cache_path):
             return
         try:
             with open(self.subscription_cache_path, 'r') as f:
                 cache = json.load(f)
-            
-            if time.time() - cache.get("last_successful_check", 0) < 24 * 3600:
-                self.is_subscription_active = cache.get("is_active", False)
-                self.access_level = cache.get("access_level", 0)
-                self.purchased_features = cache.get("purchased_features", [])
-                self.last_successful_check = cache.get("last_successful_check", 0)
-                logger.info(f"Loaded sub cache: Active={self.is_subscription_active}, Level={self.access_level}, Features={len(self.purchased_features)}")
-        except (json.JSONDecodeError, KeyError, FileNotFoundError) as e:
+                # Просто читаем, но не используем для блокировки
+                logger.info(f"Loaded sub cache (Local Mode): Active={cache.get('is_active', False)}")
+        except Exception as e:
             logger.warning(f"Failed to load sub cache: {e}")
 
     def save_subscription_cache(self):
         try:
             with open(self.subscription_cache_path, 'w') as f:
                 json.dump({
-                    "is_active": self.is_subscription_active,
-                    "access_level": self.access_level,
-                    "purchased_features": self.purchased_features,
-                    "last_successful_check": self.last_successful_check
+                    "is_active": True,
+                    "access_level": 99,
+                    "purchased_features": [],
+                    "last_successful_check": time.time()
                 }, f)
         except IOError as e:
             logger.error(f"Failed to save sub cache: {e}")
 
     def check_subscription_status(self):
-        if not self.hosting_url:
-            self.is_subscription_active = True
-            self.access_level = 99
-            logger.info("Local mode: Max access level (99).")
-            return
-        
-        with self.subscription_check_lock:
-            try:
-                headers = {"X-Bot-Token": self.hosting_token} if self.hosting_token else {}
-                payload = {"user_id": self.HOSTING_USER_ID} if self.HOSTING_USER_ID else {"golden_key": self.account.golden_key}
-                
-                response = requests.post(
-                    f"{self.hosting_url}/api/bot/check-access",
-                    json=payload,
-                    headers=headers, timeout=15
-                )
-                response.raise_for_status()
-                data = response.json()
-                
-                is_now_active = data.get("is_active", False)
-                new_access_level = data.get("access_level", 0)
-                new_owned_features = data.get("owned_features", [])
-                
-                if self.access_level != new_access_level or set(self.purchased_features) != set(new_owned_features):
-                    logger.info(f"Access changed. Level: {new_access_level}, Features: {len(new_owned_features)}")
-                    self.access_level = new_access_level
-                    self.purchased_features = new_owned_features
-                    self._refresh_features_state()
-
-                if self.is_subscription_active and not is_now_active:
-                    logger.critical("Subscription expired or revoked. Shutting down.")
-                    if self.telegram:
-                        try:
-                            self.telegram.send_notification("⚠️ Subscription expired! Shutting down.", notification_type=tg_utils.NotificationTypes.critical)
-                            time.sleep(3)
-                        except Exception as e:
-                            logger.error(f"Failed to send final notification: {e}")
-                    os._exit(0)
-
-                self.is_subscription_active = is_now_active
-                self.last_successful_check = time.time()
-                self.save_subscription_cache()
-                
-                if self.backend_unreachable:
-                    logger.info("Connection to server restored.")
-                    if self.telegram and self.backend_unreachable_notified:
-                        self.telegram.send_notification("✅ Connection to server restored.", notification_type=tg_utils.NotificationTypes.critical)
-                    self.backend_unreachable = False
-                    self.backend_unreachable_notified = False
-
-            except requests.exceptions.RequestException as e:
-                logger.warning(f"Failed to check subscription: {e}")
-                self.backend_unreachable = True
-
-                if time.time() - self.last_successful_check > self.grace_period_seconds:
-                    if self.is_subscription_active:
-                        logger.critical("Grace period expired. Server unreachable. Pausing.")
-                        if self.telegram and not self.backend_unreachable_notified:
-                             self.telegram.send_notification("⚠️ <b>Critical:</b> Server unreachable > 3 hours. Pausing.", notification_type=tg_utils.NotificationTypes.critical)
-                             self.backend_unreachable_notified = True
-                    self.is_subscription_active = False
-                else:
-                    remaining_grace = self.grace_period_seconds - (time.time() - self.last_successful_check)
-                    logger.warning(f"Using cached subscription. Grace period left: {cortex_tools.time_to_str(int(remaining_grace))}.")
-                    if self.telegram and not self.backend_unreachable_notified:
-                        self.telegram.send_notification(f"⚠️ Server unreachable. Continuing in offline mode for <b>{cortex_tools.time_to_str(int(remaining_grace))}</b>.", notification_type=tg_utils.NotificationTypes.critical)
-                        self.backend_unreachable_notified = True
+        # [MODIFIED] Всегда подтверждаем подписку
+        self.is_subscription_active = True
+        self.access_level = 99
+        return
 
     def subscription_check_loop(self):
-        if not self.hosting_url: return
-        logger.info("Subscription check loop started.")
-        while self.running:
-            self.check_subscription_status()
-            time.sleep(600)
+        # [MODIFIED] Отключаем цикл проверки подписки
+        return
 
     def is_proxy_configured(self) -> bool:
         p = self.MAIN_CFG["Proxy"]
@@ -933,11 +800,6 @@ class Cortex(object):
                 time.sleep(10)
                 continue
             
-            if self.hosting_url and not self.is_subscription_active:
-                logger.critical("Subscription inactive. Shutting down.")
-                time.sleep(5)
-                os._exit(0)
-
             self.run_handlers(events_handlers.get(event.type, []), (self, event))
             
             if event.type in feature_hooks:
@@ -954,9 +816,6 @@ class Cortex(object):
                     time.sleep(10)
                     continue
                 
-                if self.hosting_url and not self.is_subscription_active:
-                    logger.critical("Subscription inactive. Stopping raise loop.")
-                    return
                 if not self.MAIN_CFG["FunPay"].getboolean("autoRaise"):
                     time.sleep(10)
                     continue
@@ -1040,57 +899,23 @@ class Cortex(object):
                     logger.error(f"Error in feature {feature.name} (method {method_name}): {e}", exc_info=True)
 
     def init(self):
-        if not self.hosting_url:
-            self.is_subscription_active = True
-            self.access_level = 99
-            logger.info("Local mode: Max access level (99).")
+        self.is_subscription_active = True
+        self.access_level = 99
+        logger.info("Local mode: Max access level (99).")
 
-        def save_config_with_sync(self, config_obj: configparser.ConfigParser, file_path: str) -> None:
+        def save_config_local(self, config_obj: configparser.ConfigParser, file_path: str) -> None:
             try:
                 os.makedirs(os.path.dirname(file_path), exist_ok=True)
                 with open(file_path, "w", encoding="utf-8") as f:
                     config_obj.write(f)
             except Exception as e:
                 logger.error(f"Error saving config locally {file_path}: {e}")
-            
-            if self.hosting_url and self.hosting_token and self.HOSTING_USER_ID:
-                config_filename = os.path.basename(file_path)
-                
-                api_endpoint = f"{self.hosting_url}/api/bot/settings/config/{config_filename}"
-                string_io = io.StringIO()
-                config_obj.write(string_io)
-                config_content = string_io.getvalue()
-                
-                try:
-                    headers = {"X-Bot-Token": self.hosting_token}
-                    json_payload = {
-                        "content": config_content,
-                        "user_id": self.HOSTING_USER_ID
-                    }
-                    response = requests.put(api_endpoint, headers=headers, json=json_payload, timeout=10)
-                    response.raise_for_status()
-                    logger.info(f"Config {config_filename} synced with hosting.")
-                except requests.exceptions.RequestException as e:
-                    logger.error(f"Failed to sync config {config_filename} with hosting: {e}")
 
-        def save_json_setting_with_sync(self, setting_name: str, data: dict | list):
-            if self.hosting_url and self.hosting_token and self.HOSTING_USER_ID:
-                api_endpoint = f"{self.hosting_url}/api/bot/settings/json/{setting_name}"
-                try:
-                    headers = {"X-Bot-Token": self.hosting_token}
-                    json_payload = {
-                        "content": data,
-                        "user_id": self.HOSTING_USER_ID
-                    }
-                    response = requests.put(api_endpoint, headers=headers, json=json_payload, timeout=10)
-                    response.raise_for_status()
-                    logger.info(f"Setting '{setting_name}' successfully synced with hosting.")
-                except requests.exceptions.RequestException as e:
-                    logger.error(f"Failed to sync setting '{setting_name}' with hosting: {e}")
+        def save_json_setting_local(self, setting_name: str, data: dict | list):
+            pass
 
-        if self.IS_HOSTING_ENV:
-             self.save_config = py_types.MethodType(save_config_with_sync, self)
-             self.save_json_setting = py_types.MethodType(save_json_setting_with_sync, self)
+        # [MODIFIED] Больше не подменяем методы сохранения на хостинг-версии
+        # Оставляем стандартное локальное сохранение
         
         self._sync_settings_from_backend()
         
@@ -1141,9 +966,6 @@ class Cortex(object):
                 self.telegram.edit_bot()
             except Exception as e:
                 logger.warning(f"Error setting bot profile: {e}")
-        
-        if self.hosting_url:
-            self.load_subscription_cache()
         
         logger.info("Initializing features...")
         for feature in self.features.values():
@@ -1263,11 +1085,6 @@ class Cortex(object):
         
         logger.info("Initializing FunPay systems...")
         
-        if self.hosting_url:
-            self.check_subscription_status()
-            if not self.is_subscription_active:
-                 logger.critical("Subscription inactive. Functionality limited.")
-
         self.runner = FunPayAPI.Runner(self.account,
                                        disable_message_requests=self.old_mode_enabled,
                                        disabled_order_requests=False,
@@ -1279,8 +1096,6 @@ class Cortex(object):
         
         self.run_handlers(self.pre_start_handlers, (self,))
         
-        if self.hosting_url:
-            self.executor.submit(self.subscription_check_loop)
         if self.MAIN_CFG["Statistics"].getboolean("enabled"):
             self.executor.submit(statistics_cp.periodic_sales_update, self)
             

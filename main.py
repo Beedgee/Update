@@ -95,10 +95,11 @@ VERSION = "2.0.3.5"
 
 Utils.cortex_tools.set_console_title(f"FunPay Cortex v{VERSION}")
 
-IS_HOSTING_ENV = 'FPCORTEX_HOSTING_MODE' in os.environ
-BASE_PATH = os.getenv('FPCORTEX_BASE_PATH', '/data' if IS_HOSTING_ENV else os.path.dirname(os.path.abspath(__file__)))
+# ПРИНУДИТЕЛЬНОЕ ОТКЛЮЧЕНИЕ РЕЖИМА ХОСТИНГА
+IS_HOSTING_ENV = False
+BASE_PATH = os.path.dirname(os.path.abspath(__file__))
 
-if not IS_HOSTING_ENV and os.getenv('FPCORTEX_BASE_PATH') is None:
+if os.getenv('FPCORTEX_BASE_PATH') is None:
     os.chdir(BASE_PATH)
 
 print(f"--- [INFO] Базовый путь для данных определен как: {BASE_PATH} ---", flush=True)
@@ -122,19 +123,6 @@ colorama.init()
 LOGGER_CONFIG['handlers']['file_handler']['filename'] = os.path.join(BASE_PATH, 'logs/log.log')
 logging.config.dictConfig(LOGGER_CONFIG)
 
-if IS_HOSTING_ENV:
-    user_id_env = os.getenv("FPCORTEX_USER_ID")
-    redis_host = os.getenv("REDIS_HOST", "redis")
-    if user_id_env:
-        try:
-            from Utils.logger import RedisPubSubHandler
-            redis_handler = RedisPubSubHandler(host=redis_host, port=6379, channel=f"logs:{user_id_env}")
-            redis_handler.setLevel(logging.INFO)
-            logging.getLogger().addHandler(redis_handler)
-            print(f"--- [LOGGING] Redis Pub/Sub логирование включено для канала logs:{user_id_env} ---", flush=True)
-        except Exception as e:
-            print(f"--- [LOGGING] Ошибка инициализации Redis Logger: {e} ---", flush=True)
-
 root_logger = logging.getLogger()
 for handler in root_logger.handlers:
     if isinstance(handler, logging.StreamHandler):
@@ -152,22 +140,12 @@ print(f"{Fore.RED}{Style.BRIGHT}v{VERSION}{Style.RESET_ALL}\n")
 print(f"{Fore.MAGENTA}{Style.BRIGHT}Автор: {Fore.BLUE}{Style.BRIGHT}@beedge{Style.RESET_ALL}")
 
 if not os.path.exists(main_cfg_path):
-    if IS_HOSTING_ENV:
-        logger.warning(f"Файл {main_cfg_path} отсутствует. Создаю дефолтный для первого запуска.")
-        try:
-            from first_setup import default_config, create_config_obj
-            config = create_config_obj(default_config)
-            with open(main_cfg_path, "w", encoding="utf-8") as f:
-                config.write(f)
-        except Exception as e:
-            logger.critical(f"Не удалось создать дефолтный конфиг: {e}")
-            sys.exit(1)
-    else:
-        logger.info("Основной конфиг не найден, запускаю первичную настройку...")
-        first_setup()
-        sys.exit()
+    # Так как IS_HOSTING_ENV всегда False, сработает только эта ветка
+    logger.info("Основной конфиг не найден, запускаю первичную настройку...")
+    first_setup()
+    sys.exit()
 
-if sys.platform == "linux" and os.getenv('FPCORTEX_IS_RUNNING_AS_SERVICE', '0') == '1' and not IS_HOSTING_ENV:
+if sys.platform == "linux" and os.getenv('FPCORTEX_IS_RUNNING_AS_SERVICE', '0') == '1':
     import getpass
     service_name = "FunPayCortex"
     run_dir = f"/run/{service_name}"
@@ -199,15 +177,7 @@ signal.signal(signal.SIGINT, sigterm_handler)
 try:
     pre_main_cfg = cfg_loader.load_main_config(main_cfg_path)
     
-    backend_url_env = os.getenv('FPCORTEX_BACKEND_URL')
-    bot_token_env = os.getenv('FPCORTEX_BOT_TOKEN')
-
-    if backend_url_env and bot_token_env:
-        logger.info("Обнаружены переменные окружения хостинга. Применяю их к конфигурации.")
-        if 'CortexHosting' not in pre_main_cfg:
-            pre_main_cfg.add_section('CortexHosting')
-        pre_main_cfg.set('CortexHosting', 'url', backend_url_env)
-        pre_main_cfg.set('CortexHosting', 'token', bot_token_env)
+    # Блок проверки переменных окружения для хостинга удален
     
     if pre_main_cfg["Proxy"]["ip"] and pre_main_cfg["Proxy"]["port"]:
          logger.info("Данные прокси обнаружены в конфиге.")
@@ -225,53 +195,7 @@ try:
     cortex_instance.AR_CFG_LOAD_ERROR = ar_config_failed
     cortex_instance.AD_CFG_LOAD_ERROR = ad_config_failed
 
-    def save_config_with_sync(self, config_obj: configparser.ConfigParser, file_path: str) -> None:
-        try:
-            os.makedirs(os.path.dirname(file_path), exist_ok=True)
-            with open(file_path, "w", encoding="utf-8") as f:
-                config_obj.write(f)
-        except Exception as e:
-            logger.error(f"Ошибка локального сохранения конфига {file_path}: {e}")
-        
-        if self.hosting_url and self.hosting_token:
-            config_filename = os.path.basename(file_path)
-            api_endpoint = f"{self.hosting_url}/api/bot/settings/config/{config_filename}"
-            
-            string_io = io.StringIO()
-            config_obj.write(string_io)
-            config_content = string_io.getvalue()
-            
-            try:
-                headers = {"X-Bot-Token": self.hosting_token}
-                json_payload = {
-                    "content": config_content,
-                    "golden_key": self.account.golden_key,
-                    "user_id": self.HOSTING_USER_ID
-                }
-                response = requests.put(api_endpoint, headers=headers, json=json_payload, timeout=10)
-                response.raise_for_status()
-                logger.info(f"Конфиг {config_filename} успешно синхронизирован с хостингом.")
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Не удалось синхронизировать конфиг {config_filename} с хостингом: {e}")
-                
-    def save_json_setting_with_sync(self, setting_name: str, data: dict | list):
-        if self.hosting_url and self.hosting_token:
-            api_endpoint = f"{self.hosting_url}/api/bot/settings/json/{setting_name}"
-            try:
-                headers = {"X-Bot-Token": self.hosting_token}
-                json_payload = {
-                    "content": data,
-                    "golden_key": self.account.golden_key,
-                    "user_id": self.HOSTING_USER_ID
-                }
-                response = requests.put(api_endpoint, headers=headers, json=json_payload, timeout=10)
-                response.raise_for_status()
-                logger.info(f"Настройка '{setting_name}' успешно синхронизирована с хостингом.")
-            except requests.exceptions.RequestException as e:
-                logger.error(f"Не удалось синхронизировать настройку '{setting_name}' с хостингом: {e}")
-
-    cortex_instance.save_config = types.MethodType(save_config_with_sync, cortex_instance)
-    cortex_instance.save_json_setting = types.MethodType(save_json_setting_with_sync, cortex_instance)
+    # Блок переопределения методов сохранения конфига (Monkey Patching) удален
 
     cortex_instance.init()
     
