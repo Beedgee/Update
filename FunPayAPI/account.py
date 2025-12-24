@@ -46,8 +46,6 @@ class Account:
         self._proxy = proxy
         
         # ИЗМЕНЕНИЕ: Используем threading.local для хранения сессий.
-        # Это создает отдельную сессию tls_client для каждого потока.
-        # Глобальная блокировка больше не нужна.
         self._thread_local = threading.local()
         
         self.html: str | None = None
@@ -119,12 +117,6 @@ class Account:
     def proxy(self, value: Optional[dict]):
         self._proxy = value
         # Обновляем прокси в текущей сессии потока
-        # Внимание: для других потоков прокси обновятся при следующем вызове _get_session, 
-        # но так как мы пересоздаем сессию только при отсутствии, 
-        # нам нужно обновлять прокси динамически во всех активных.
-        # Однако threading.local не позволяет итерировать по всем потокам.
-        # Поэтому мы просто обновляем текущую.
-        # В большинстве случаев прокси задается при старте.
         if hasattr(self._thread_local, "session"):
             self._thread_local.session.proxies = value if value else {}
 
@@ -132,11 +124,8 @@ class Account:
                exclude_phpsessid: bool = False, raise_not_200: bool = False,
                locale: Literal["ru", "en", "uk"] | None = None) -> requests.Response:
         
-        if not self._proxy:
-             fake_resp = requests.Response()
-             fake_resp.status_code = 0
-             fake_resp.url = api_method
-             raise exceptions.RequestFailedError(fake_resp)
+        # ИЗМЕНЕНИЕ: Убрана принудительная проверка наличия прокси
+        # if not self._proxy: ... raise ... (УДАЛЕНО)
         
         def normalize_url(api_method: str, locale: Literal["ru", "en", "uk"] | None = None) -> str:
             api_method = "https://funpay.com/" if api_method == "https://funpay.com" else api_method
@@ -183,9 +172,11 @@ class Account:
         # Получаем сессию для ТЕКУЩЕГО потока
         current_session = self._get_session()
         
-        # Убедимся, что прокси актуальны (на случай, если они менялись в другом потоке)
+        # ИЗМЕНЕНИЕ: Явная установка или очистка прокси
         if self._proxy:
             current_session.proxies = self._proxy
+        else:
+            current_session.proxies = {}
 
         for i in range(attempts):
             try:

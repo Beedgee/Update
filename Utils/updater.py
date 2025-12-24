@@ -14,6 +14,10 @@ logger = getLogger("FPC.update_checker")
 localizer = Localizer()
 _ = localizer.translate
 
+# Настройки репозитория для обновлений
+REPO_OWNER = "Beedgee"
+REPO_NAME = "FunPayCortex"
+
 HEADERS = {
     "accept": "application/vnd.github+json"
 }
@@ -49,14 +53,19 @@ def get_tags(current_tag: str) -> list[str] | None:
         while not any([el.get("name") == current_tag for el in json_response]):
             if page != 1:
                 time.sleep(1)
-            response = requests.get(f"https://api.github.com/repos/Beedgee/FunPayCortex/tags?page={page}",
-                                    headers=HEADERS)
+            
+            url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/tags?page={page}"
+            response = requests.get(url, headers=HEADERS)
+            
             if not response.status_code == 200 or not response.json():
                 logger.debug(f"Update status code is {response.status_code}!")
                 return None
             else:
                 json_response.extend(response.json())
                 page += 1
+                if page > 10: # Защита от бесконечного цикла, если тег не найден
+                    break
+        
         tags = [i.get("name") for i in json_response]
         return tags or None
     except:
@@ -99,14 +108,19 @@ def get_releases(from_tag: str) -> list[Release] | None:
         while not any([el.get("tag_name") == from_tag for el in json_response]):
             if page != 1:
                 time.sleep(1)
-            response = requests.get(f"https://api.github.com/repos/Beedgee/FunPayCortex/releases?page={page}",
-                                    headers=HEADERS)
+            
+            url = f"https://api.github.com/repos/{REPO_OWNER}/{REPO_NAME}/releases?page={page}"
+            response = requests.get(url, headers=HEADERS)
+            
             if not response.status_code == 200 or not response.json():
                 logger.debug(f"Update status code is {response.status_code}!")
                 return None
             else:
                 json_response.extend(response.json())
                 page += 1
+                if page > 10:
+                    break
+
         result = []
         to_append = False
         for el in json_response[::-1]:

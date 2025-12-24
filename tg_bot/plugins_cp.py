@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from cortex import Cortex
+    from tg_bot.bot import TGBot
 
 from tg_bot import utils, keyboards, CBT
 from tg_bot.static_keyboards import CLEAR_STATE_BTN
@@ -178,6 +179,45 @@ def init_plugins_cp(cortex: Cortex, *args):
             result = bot.send_message(obj.chat.id, _("pl_new"), reply_markup=CLEAR_STATE_BTN())
             tg.set_state(obj.chat.id, result.id, obj.from_user.id, CBT.UPLOAD_PLUGIN, {"offset": 0})
 
+    def save_uploaded_plugin(tg_inst: TGBot, msg: Message):
+        """
+        Функция для скачивания и сохранения плагина.
+        """
+        tg_inst.clear_state(msg.chat.id, msg.from_user.id, True)
+
+        # Проверка расширения файла
+        if not msg.document or not msg.document.file_name.endswith(".py"):
+            bot.send_message(msg.chat.id, "❌ Ошибка: Файл должен иметь расширение .py")
+            return
+
+        progress_msg = bot.send_message(msg.chat.id, "📥 Скачиваю плагин...")
+
+        try:
+            # Скачивание файла
+            file_info = bot.get_file(msg.document.file_id)
+            downloaded_file = bot.download_file(file_info.file_path)
+
+            plugin_name = msg.document.file_name
+            # Убедимся, что папка существует
+            if not os.path.exists("plugins"):
+                os.makedirs("plugins")
+            
+            save_path = os.path.join("plugins", plugin_name)
+
+            # Сохранение
+            with open(save_path, 'wb') as new_file:
+                new_file.write(downloaded_file)
+
+            bot.edit_message_text(f"✅ Плагин <b>{utils.escape(plugin_name)}</b> успешно загружен!\n"
+                                  f"Перезагрузите бота, чтобы он появился в списке.",
+                                  progress_msg.chat.id, progress_msg.id)
+
+            logger.info(f"Admin uploaded new plugin: {plugin_name}")
+
+        except Exception as e:
+            logger.error(f"Error saving plugin: {e}", exc_info=True)
+            bot.edit_message_text(f"❌ Произошла ошибка при сохранении: {e}", progress_msg.chat.id, progress_msg.id)
+
     tg.cbq_handler(open_plugins_list, lambda c: c.data.startswith(f"{CBT.PLUGINS_LIST}:"))
     tg.cbq_handler(open_edit_plugin_cp, lambda c: c.data.startswith(f"{CBT.EDIT_PLUGIN}:"))
     tg.cbq_handler(open_plugin_commands, lambda c: c.data.startswith(f"{CBT.PLUGIN_COMMANDS}:"))
@@ -189,6 +229,9 @@ def init_plugins_cp(cortex: Cortex, *args):
 
     tg.cbq_handler(act_upload_plugin, lambda c: c.data.startswith(f"{CBT.UPLOAD_PLUGIN}:"))
     tg.msg_handler(act_upload_plugin, commands=["upload_plugin"])
+
+    # Регистрация обработчика файла
+    tg.file_handler(CBT.UPLOAD_PLUGIN, save_uploaded_plugin)
 
 
 BIND_TO_PRE_INIT = [init_plugins_cp]

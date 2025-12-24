@@ -24,6 +24,10 @@ def init_proxy_cp(cortex_instance: Cortex, *args):
         tg.pr_dict = {}
 
     def check_one_proxy_thread_target(proxy_str: str):
+        """
+        Фоновая проверка одного прокси. 
+        Оставлена для планового чекера, но не вызывается принудительно при добавлении.
+        """
         try:
             proxy_for_check = {"http": f"http://{proxy_str}", "https": f"http://{proxy_str}"}
             tg.pr_dict[proxy_str] = check_proxy(proxy_for_check)
@@ -32,22 +36,22 @@ def init_proxy_cp(cortex_instance: Cortex, *args):
             tg.pr_dict[proxy_str] = False
 
     def check_all_proxies_periodically():
+        """
+        Периодическая проверка прокси, если включена настройка 'check' в конфиге.
+        """
         if cortex_instance.MAIN_CFG["Proxy"].getboolean("enable") and cortex_instance.MAIN_CFG["Proxy"].getboolean("check"):
             logger.info("Запущен периодический чекер прокси.")
             while True:
                 proxies_to_check = list(cortex_instance.proxy_dict.values())
                 if proxies_to_check:
-                    logger.info(f"Начинаю плановую проверку {len(proxies_to_check)} прокси...")
                     for proxy_item_str in proxies_to_check:
                         check_one_proxy_thread_target(proxy_item_str)
                         time.sleep(0.1) 
-                    logger.info("Проверка прокси завершена.")
                 
                 check_interval = cortex_instance.MAIN_CFG["Proxy"].getint("checkInterval", 3600)
                 time.sleep(check_interval)
-        else:
-            logger.info("Периодическая проверка прокси отключена.")
     
+    # Запускаем фоновый чекер один раз при инициализации
     if not getattr(init_proxy_cp, "_checker_thread_started", False):
         init_proxy_cp._checker_thread_started = True
         cortex_instance.executor.submit(check_all_proxies_periodically)
@@ -57,6 +61,8 @@ def init_proxy_cp(cortex_instance: Cortex, *args):
         offset = int(c.data.split(":")[1])
         is_enabled = cortex_instance.MAIN_CFG["Proxy"].getboolean("enable")
         is_check_enabled = cortex_instance.MAIN_CFG["Proxy"].getboolean("check")
+        
+        # Тексты статусов
         proxy_enabled_text = _("proxy_status_enabled") if is_enabled else _("proxy_status_disabled")
         check_enabled_text = _("proxy_check_status_enabled") if is_check_enabled else _("proxy_check_status_disabled")
         
@@ -66,6 +72,7 @@ def init_proxy_cp(cortex_instance: Cortex, *args):
             current_proxy_display = f"<code>{utils.mask_proxy_string(current_proxy_str)}</code>" if current_proxy_str else "<i>(" + _("proxy_not_selected") + ")</i>"
 
         interval_min = cortex_instance.MAIN_CFG["Proxy"].getint("checkInterval", 3600) // 60
+        
         status_text = f"""
 🚦 <b>{_('proxy_global_status_header')}</b>
   • {_('proxy_module_status_label')} {proxy_enabled_text}
@@ -90,7 +97,13 @@ def init_proxy_cp(cortex_instance: Cortex, *args):
         bot.answer_callback_query(c.id)
 
     def add_proxy(m: Message):
-        offset = tg.get_state(m.chat.id, m.from_user.id)["data"]["offset"]
+        """
+        Добавление прокси.
+        ИЗМЕНЕНИЕ: Убрана автоматическая проверка (прогрев) сразу после добавления.
+        """
+        state_data = tg.get_state(m.chat.id, m.from_user.id)
+        offset = state_data["data"]["offset"] if state_data else 0
+        
         reply_kb = K().add(B(_("gl_back"), callback_data=f"{CBT.PROXY}:{offset}"))
         tg.clear_state(m.chat.id, m.from_user.id, True)
         
@@ -108,8 +121,7 @@ def init_proxy_cp(cortex_instance: Cortex, *args):
             
             bot.send_message(m.chat.id, _("proxy_added", proxy_str=utils.mask_proxy_string(proxy_str)), reply_markup=reply_kb)
             
-            if cortex_instance.MAIN_CFG["Proxy"].getboolean("enable") and cortex_instance.MAIN_CFG["Proxy"].getboolean("check"):
-                cortex_instance.executor.submit(check_one_proxy_thread_target, proxy_str)
+            # Раньше здесь запускалась проверка (прогрев). Теперь она убрана.
                 
         except ValueError:
             bot.send_message(m.chat.id, _("proxy_format"), reply_markup=reply_kb)
@@ -118,8 +130,12 @@ def init_proxy_cp(cortex_instance: Cortex, *args):
             bot.send_message(m.chat.id, _("proxy_adding_error"), reply_markup=reply_kb)
 
     def choose_proxy(c: CallbackQuery):
+        """
+        Выбор и применение прокси.
+        ИЗМЕНЕНИЕ: Убрана проверка доступности (check_proxy). Прокси применяется сразу.
+        """
         bot.answer_callback_query(c.id)
-        bot.edit_message_text(f'{_("desc_proxy")}\n🔄 Проверяю и применяю прокси...', c.message.chat.id, c.message.id)
+        bot.edit_message_text(f'{_("desc_proxy")}\n🔄 Применяю прокси (без проверки)...', c.message.chat.id, c.message.id)
 
         def _threaded_choose():
             __, offset_str, proxy_id_str = c.data.split(":")
@@ -134,22 +150,22 @@ def init_proxy_cp(cortex_instance: Cortex, *args):
                 return
 
             try:
+                # Формируем словарь для requests, но НЕ проверяем его
                 proxy_for_check = {"http": f"http://{proxy_str}", "https": f"http://{proxy_str}"}
-                is_working = check_proxy(proxy_for_check)
-                tg.pr_dict[proxy_str] = is_working
+                
+                # Помечаем как "рабочий" без реальной проверки, чтобы интерфейс не ругался
+                tg.pr_dict[proxy_str] = True 
 
-                if not is_working:
-                    bot.answer_callback_query(c.id, f"❌ Прокси {utils.mask_proxy_string(proxy_str)} не работает.", show_alert=True)
-                    c.data = f"{CBT.PROXY}:{offset}"
-                    open_proxy_list(c)
-                    return
-
+                # Парсим для сохранения в конфиг
                 login, password, ip, port = validate_proxy(proxy_str)
+                
+                # Обновляем конфиг
                 cortex_instance.MAIN_CFG["Proxy"]["enable"] = "1"
                 cortex_instance.MAIN_CFG["Proxy"].update({"ip": ip, "port": str(port), "login": login, "password": password})
                 
                 cortex_instance.save_config(cortex_instance.MAIN_CFG, os.path.join(cortex_instance.base_path, "configs/_main.cfg"))
                 
+                # Применяем в аккаунт
                 cortex_instance.account.proxy = proxy_for_check
                 
                 bot.answer_callback_query(c.id, _("proxy_selected_and_applied", proxy_str=utils.mask_proxy_string(proxy_str)), show_alert=True)
@@ -166,6 +182,10 @@ def init_proxy_cp(cortex_instance: Cortex, *args):
         cortex_instance.executor.submit(_threaded_choose)
 
     def delete_proxy(c: CallbackQuery):
+        """
+        Удаление прокси.
+        ИЗМЕНЕНИЕ: Если удаляется активный прокси, бот НЕ останавливается, а переходит на прямое соединение.
+        """
         __, offset_str, proxy_id_str = c.data.split(":")
         offset = int(offset_str)
         proxy_id = int(proxy_id_str)
@@ -174,30 +194,31 @@ def init_proxy_cp(cortex_instance: Cortex, *args):
             proxy_to_delete_str = cortex_instance.proxy_dict[proxy_id]
             current_proxy_str = utils.get_current_proxy_str(cortex_instance.MAIN_CFG["Proxy"])
 
+            # Если удаляем тот прокси, который сейчас используется
             if cortex_instance.MAIN_CFG["Proxy"].getboolean("enable") and proxy_to_delete_str == current_proxy_str:
+                # Очищаем данные прокси в конфиге
                 for key in ("ip", "port", "login", "password"):
                     cortex_instance.MAIN_CFG["Proxy"][key] = ""
+                
+                # ОТКЛЮЧАЕМ прокси (Enable = 0), вместо остановки бота
                 cortex_instance.MAIN_CFG["Proxy"]["enable"] = "0"
                 
+                # Убираем прокси из объекта аккаунта
                 cortex_instance.account.proxy = None
-                cortex_instance.funpay_connection_ok = False
-                cortex_instance._enter_degraded_mode(
-                    "Активный прокси был удален пользователем.",
-                    "🛑 <b>Прокси удален!</b>\nРабота остановлена для защиты IP. Отправьте новый прокси в чат."
-                )
-
-                tg.set_state(c.message.chat.id, c.message.id, c.from_user.id, "SETUP_PROXY_MANDATORY")
                 
+                # Сохраняем конфиг в отдельном потоке
                 def _threaded_save():
                     cortex_instance.save_config(cortex_instance.MAIN_CFG, os.path.join(cortex_instance.base_path, "configs/_main.cfg"))
                 cortex_instance.executor.submit(_threaded_save)
                 
-                bot.answer_callback_query(c.id, "✅ Прокси удален. Работа остановлена.", show_alert=True)
+                bot.answer_callback_query(c.id, "✅ Прокси удален. Переход на прямое соединение (без прокси).", show_alert=True)
             else:
                  bot.answer_callback_query(c.id, _("proxy_deleted_successfully", proxy_str=utils.mask_proxy_string(proxy_to_delete_str)), show_alert=True)
 
+            # Удаляем из словаря
             del cortex_instance.proxy_dict[proxy_id]
             cache_proxy_dict(cortex_instance.proxy_dict, cortex_instance.base_path)
+            
             if proxy_to_delete_str in tg.pr_dict:
                 del tg.pr_dict[proxy_to_delete_str]
             

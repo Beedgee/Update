@@ -1,4 +1,4 @@
-# FunPayCortex/tg_bot/statistics_cp.py
+# tg_bot/statistics_cp.py
 
 from __future__ import annotations
 import json
@@ -6,7 +6,6 @@ import time
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING
 import os
-from threading import Thread
 import requests
 
 from FunPayAPI.common.enums import OrderStatuses
@@ -26,74 +25,113 @@ localizer = Localizer()
 _ = localizer.translate
 
 WITHDRAWAL_FORECAST_FILE = "storage/cache/withdrawal_forecast.json"
+LOCAL_STATS_FILE = "storage/cache/local_stats.json"
 
-# Минимальный уровень доступа для статистики
-MIN_ACCESS_LEVEL = 2
+# Убираем проверки уровня доступа, так как это self-hosted версия
+def ensure_files_exist(cortex: Cortex):
+    path = os.path.join(cortex.base_path, LOCAL_STATS_FILE)
+    if not os.path.exists(path):
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump([], f)
 
 def upload_sales_to_backend(cortex: Cortex, sales: list):
-    # Проверка уровня доступа перед отправкой данных
-    if cortex.access_level < MIN_ACCESS_LEVEL:
-        return
+    """
+    Вместо отправки на бэкенд, сохраняем продажи в локальный JSON.
+    """
+    path = os.path.join(cortex.base_path, LOCAL_STATS_FILE)
+    ensure_files_exist(cortex)
+    
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            local_data = json.load(f)
+    except:
+        local_data = []
 
-    if not cortex.hosting_url or not cortex.hosting_token or not cortex.HOSTING_USER_ID:
-        return
-
-    payload_sales = []
+    # Преобразуем входящие продажи в словарь для простоты
+    existing_ids = {item["order_id"] for item in local_data}
+    
+    updated = False
     for sale in sales:
         status_str = sale.status.name if hasattr(sale.status, 'name') else str(sale.status)
         currency_str = str(sale.currency)
-        
         date_iso = sale.date.isoformat() if sale.date else datetime.now().isoformat()
-
-        payload_sales.append({
+        
+        sale_obj = {
             "order_id": sale.id,
             "description": sale.description,
             "price": sale.price,
             "currency": currency_str,
             "status": status_str,
             "buyer_username": sale.buyer_username,
-            "date": date_iso
-        })
+            "date": date_iso,
+            "timestamp": sale.date.timestamp() if sale.date else time.time()
+        }
 
-    if not payload_sales:
-        return
+        # Если заказ уже есть, обновляем его статус
+        found = False
+        for i, item in enumerate(local_data):
+            if item["order_id"] == sale.id:
+                local_data[i] = sale_obj
+                found = True
+                updated = True
+                break
+        
+        if not found:
+            local_data.append(sale_obj)
+            updated = True
 
-    url = f"{cortex.hosting_url}/api/bot/sales/sync"
-    headers = {"X-Bot-Token": cortex.hosting_token}
-    body = {
-        "user_id": cortex.HOSTING_USER_ID,
-        "sales": payload_sales
-    }
-    
-    try:
-        requests.post(url, json=body, headers=headers, timeout=10)
-    except Exception as e:
-        print(f"[Stats] Failed to sync sales to backend: {e}")
+    if updated:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(local_data, f, ensure_ascii=False, indent=2)
 
 
 def get_stats_from_backend(cortex: Cortex, period_days: int | None):
-    # Проверка уровня доступа перед получением данных
-    if cortex.access_level < MIN_ACCESS_LEVEL:
+    """
+    Генерирует статистику на основе локального JSON файла.
+    """
+    path = os.path.join(cortex.base_path, LOCAL_STATS_FILE)
+    ensure_files_exist(cortex)
+    
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except:
         return None
 
-    if not cortex.hosting_url or not cortex.hosting_token or not cortex.HOSTING_USER_ID:
-        return None
+    # Фильтрация по времени
+    if period_days is not None:
+        cutoff_time = time.time() - (period_days * 86400)
+        filtered_data = [x for x in data if x.get("timestamp", 0) >= cutoff_time]
+    else:
+        filtered_data = data
 
-    url = f"{cortex.hosting_url}/api/bot/sales/stats"
-    headers = {"X-Bot-Token": cortex.hosting_token}
-    body = {
-        "user_id": cortex.HOSTING_USER_ID,
-        "period_days": period_days
+    sales_count = 0
+    sales_sum = {}
+    refund_count = 0
+    refund_sum = {}
+
+    for item in filtered_data:
+        curr = item["currency"]
+        price = item["price"]
+        status = item["status"]
+
+        # Логика подсчета (адаптируйте статусы под ваши Enum)
+        # Обычно 'closed', 'paid' - это успех. 'refunded' - возврат.
+        if status in ["refunded", "OrderStatuses.REFUNDED"]:
+            refund_count += 1
+            refund_sum[curr] = refund_sum.get(curr, 0) + price
+        elif status in ["closed", "paid", "OrderStatuses.CLOSED", "OrderStatuses.PAID"]:
+            sales_count += 1
+            sales_sum[curr] = sales_sum.get(curr, 0) + price
+
+    return {
+        "sales_count": sales_count,
+        "sales_sum": sales_sum,
+        "refund_count": refund_count,
+        "refund_sum": refund_sum
     }
 
-    try:
-        resp = requests.post(url, json=body, headers=headers, timeout=10)
-        if resp.status_code == 200:
-            return resp.json()
-    except Exception as e:
-        print(f"[Stats] Failed to get stats from backend: {e}")
-    return None
-
+# ... (load_forecast и save_forecast оставляем без изменений) ...
 def load_forecast(cortex: Cortex):
     path = os.path.join(cortex.base_path, WITHDRAWAL_FORECAST_FILE)
     if os.path.exists(path):
@@ -114,23 +152,15 @@ def save_forecast(cortex: Cortex):
 
 def periodic_sales_update(cortex: Cortex):
     load_forecast(cortex)
-    
-    # Первичный проход только если уровень доступа позволяет
-    if cortex.access_level >= MIN_ACCESS_LEVEL:
-        scan_and_sync(cortex)
+    scan_and_sync(cortex) # Первый скан
     
     report_interval_hours = cortex.MAIN_CFG["Statistics"].getint("report_interval", 0)
     last_report_time = time.time()
 
     while True:
-        # Если уровень доступа упал или недостаточен, просто ждем
-        if cortex.access_level < MIN_ACCESS_LEVEL:
-            time.sleep(3600)
-            continue
-
+        # Убраны проверки уровня доступа
         if report_interval_hours > 0 and time.time() - last_report_time >= report_interval_hours * 3600:
             scan_and_sync(cortex) 
-            
             period_days = cortex.MAIN_CFG["Statistics"].getint("analysis_period", 30)
             stats_data = get_stats_from_backend(cortex, period_days)
             
@@ -143,30 +173,30 @@ def periodic_sales_update(cortex: Cortex):
         scan_and_sync(cortex)
 
 def scan_and_sync(cortex: Cortex):
-    # Дополнительная защита на уровне функции сканирования
-    if cortex.access_level < MIN_ACCESS_LEVEL:
-        return
-
+    # Убрана проверка уровня доступа
     try:
         next_pos = None
         for _ in range(3): 
             time.sleep(1)
+            # Получаем продажи с FP
             result = cortex.account.get_sales(start_from=next_pos, include_paid=True, include_closed=True, include_refunded=True)
             next_pos, orders_list, _, _ = result
             
             if orders_list:
-                upload_sales_to_backend(cortex, orders_list)
+                upload_sales_to_backend(cortex, orders_list) # Теперь это локальная функция
             
             if not next_pos:
                 break
     except Exception as e:
         print(f"[Stats] Error during background scan: {e}")
 
+# ... (format_price_summary и format_stats_message оставляем без изменений) ...
 def format_price_summary(price_dict: dict) -> str:
     if not price_dict: return "0 ¤"
     return " | ".join([f"<b>{value:,.2f}</b> {currency}".replace(",", " ") for currency, value in sorted(price_dict.items())])
 
 def format_stats_message(cortex: Cortex, period_name: str, stats: dict) -> str:
+    # (Код этой функции из оригинала оставляем без изменений)
     if not cortex.balance:
         return f"📊 <b>Статистика за {period_name}</b>\n\n⚠️ Не удалось загрузить данные о балансе."
 
@@ -214,17 +244,13 @@ def init_statistics_cp(cortex: Cortex, *args):
     bot = tg.bot
 
     def open_statistics_menu(c: CallbackQuery):
-        # ПРОВЕРКА УРОВНЯ ДОСТУПА
-        if cortex.access_level < MIN_ACCESS_LEVEL:
-            bot.answer_callback_query(c.id, "🔒 Эта функция доступна на тарифе «Продвинутый» (Level 2) и выше.", show_alert=True)
-            return
-
+        # УБРАНА ПРОВЕРКА УРОВНЯ ДОСТУПА
         bot.answer_callback_query(c.id)
 
         period_key = c.data.split(":")[1]
         
         if period_key == "main":
-            bot.edit_message_text("📊 <b>Статистика</b>\n\nВыберите период для анализа (Данные хранятся в базе):", c.message.chat.id, c.message.id,
+            bot.edit_message_text("📊 <b>Статистика</b>\n\nВыберите период для анализа (Данные хранятся локально):", c.message.chat.id, c.message.id,
                                   reply_markup=kb.statistics_menu(cortex))
             return
 
@@ -237,7 +263,7 @@ def init_statistics_cp(cortex: Cortex, *args):
             if stats_data:
                 msg_text = format_stats_message(cortex, period_names.get(period_key, "выбранный период"), stats_data)
             else:
-                msg_text = "❌ Ошибка получения статистики с сервера или данных нет."
+                msg_text = "❌ Данных о статистике пока нет."
 
             try:
                 bot.edit_message_text(msg_text, c.message.chat.id, c.message.id, reply_markup=kb.statistics_menu(cortex))
@@ -247,11 +273,7 @@ def init_statistics_cp(cortex: Cortex, *args):
 
 
     def open_statistics_config(c: CallbackQuery):
-        # ПРОВЕРКА УРОВНЯ ДОСТУПА
-        if cortex.access_level < MIN_ACCESS_LEVEL:
-            bot.answer_callback_query(c.id, "🔒 Эта функция доступна на тарифе «Продвинутый» (Level 2) и выше.", show_alert=True)
-            return
-
+        # УБРАНА ПРОВЕРКА УРОВНЯ ДОСТУПА
         action = c.data.split(":")[1]
         if action == "main":
             bot.edit_message_text("⚙️ <b>Настройки статистики</b>", c.message.chat.id, c.message.id,
@@ -265,7 +287,7 @@ def init_statistics_cp(cortex: Cortex, *args):
         bot.answer_callback_query(c.id)
     
     def set_analysis_period(m: Message):
-        if cortex.access_level < MIN_ACCESS_LEVEL: return
+        # УБРАНА ПРОВЕРКА УРОВНЯ ДОСТУПА
         tg.clear_state(m.chat.id, m.from_user.id, True)
         def threaded_save():
             try:
@@ -279,7 +301,7 @@ def init_statistics_cp(cortex: Cortex, *args):
         cortex.executor.submit(threaded_save)
             
     def set_report_interval(m: Message):
-        if cortex.access_level < MIN_ACCESS_LEVEL: return
+        # УБРАНА ПРОВЕРКА УРОВНЯ ДОСТУПА
         tg.clear_state(m.chat.id, m.from_user.id, True)
         def threaded_save():
             try:
@@ -298,16 +320,15 @@ def init_statistics_cp(cortex: Cortex, *args):
     tg.msg_handler(set_report_interval, func=lambda m: tg.check_state(m.chat.id, m.from_user.id, f"{CBT.STATS_CONFIG_MENU}:set_interval"))
 
 def sales_update_hook(cortex: Cortex, event: NewOrderEvent):
-    if cortex.access_level >= MIN_ACCESS_LEVEL:
-        upload_sales_to_backend(cortex, [event.order])
+    # Локальное сохранение
+    upload_sales_to_backend(cortex, [event.order])
 
 def order_status_hook(cortex: Cortex, event: OrderStatusChangedEvent):
-    if cortex.access_level >= MIN_ACCESS_LEVEL:
-        upload_sales_to_backend(cortex, [event.order])
+    # Локальное сохранение
+    upload_sales_to_backend(cortex, [event.order])
 
 def withdrawal_forecast_hook(cortex: Cortex, event: NewMessageEvent):
-    # Эта функция работает локально для прогноза, ее можно оставить доступной или тоже закрыть.
-    # Оставим доступной, так как она не требует бэкенда.
+    # Оставляем как есть, работает локально
     if event.message.type not in [MessageTypes.ORDER_CONFIRMED, MessageTypes.ORDER_CONFIRMED_BY_ADMIN,
                                   MessageTypes.ORDER_REOPENED, MessageTypes.REFUND, MessageTypes.REFUND_BY_ADMIN]:
         return

@@ -93,11 +93,6 @@ class Runner:
         json_response = response.json()
         return json_response
 
-    # ... (методы parse_updates, parse_chat_updates, generate_new_message_events, parse_order_updates без изменений) ...
-    # Я их пропускаю для краткости, они остаются такими же как в оригинале,
-    # так как изменения только в __init__ и listen.
-    # ПОЛНЫЙ КОД НИЖЕ ВКЛЮЧАЕТ ВСЕ МЕТОДЫ.
-
     def parse_updates(self, updates: dict) -> list:
         events = []
         if not updates.get("objects"):
@@ -318,9 +313,7 @@ class Runner:
             self.last_activity = time.time()
             # -----------------------
 
-            if not self.account.proxy:
-                time.sleep(5)
-                continue
+            # ИЗМЕНЕНИЕ: БЛОКИРОВКА ИЗ-ЗА ОТСУТСТВИЯ ПРОКСИ УБРАНА
 
             jitter = requests_delay * 0.2
             sleep_time = random.uniform(max(0.5, requests_delay - jitter), requests_delay + jitter)
